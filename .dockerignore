@@ -1,0 +1,45 @@
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.joblib
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
+*.out
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Build / cache / misc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.DS_Store
+
+# Local development tools
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# uv-related cache
+.uv/
+uv.lock.bak
+
+# Other
