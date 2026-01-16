@@ -8,5 +8,6 @@ dependencies = [
     "confluent-kafka>=2.13.0",
     "fastapi>=0.128.0",
     "h3>=4.4.1",
+    "python-dotenv>=1.2.1",
     "redis>=7.1.0",
 ]
