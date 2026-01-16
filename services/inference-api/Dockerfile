@@ -1,16 +1,19 @@
 FROM python:3.12-slim
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 WORKDIR /app
 
-# Install Python dependencies
-RUN pip install --no-cache-dir \
-    fastapi>=0.128.0 \
-    uvicorn>=0.30.0 \
-    redis>=7.1.0
+COPY pyproject.toml uv.lock ./
 
-# Copy application code
-COPY services/common /app/common
-COPY services/inference-api/main.py /app/
+RUN uv pip install --system --no-cache .
+
+COPY services/common /app/services/common
+COPY services/inference-api/main.py /app/main.py
+COPY services/inference-api/features.py /app/features.py
+COPY services/inference-api/derive.py /app/derive.py
+
+ENV PYTHONPATH=/app
 
 EXPOSE 8000
 
