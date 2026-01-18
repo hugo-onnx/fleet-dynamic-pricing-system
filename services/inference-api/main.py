@@ -15,6 +15,8 @@ from derive import derive_features
 from pricing import compute_price_multiplier
 from monitoring.metrics import record_latency
 from monitoring.drift import record_feature_snapshot
+from eta.model import ETAEstimator
+from eta.features import assemble_eta_features
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,12 +25,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 redis_client: redis.Redis | None = None
+eta_model: ETAEstimator | None = None
+
+ETA_MODEL_PATH = "/app/models/eta_model.joblib"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage Redis connection lifecycle."""
-    global redis_client
+    global redis_client, eta_model
     
     redis_client = redis.Redis(
         host=REDIS_HOST,
@@ -44,6 +49,17 @@ async def lifespan(app: FastAPI):
     except redis.ConnectionError as e:
         logger.error(f"Failed to connect to Redis: {e}")
         raise
+
+    try:
+        eta_model = ETAEstimator(ETA_MODEL_PATH)
+        logger.info(f"Loaded ETA model from {ETA_MODEL_PATH}")
+    except FileNotFoundError:
+        logger.warning(f"ETA model not found at {ETA_MODEL_PATH}, ETA endpoint will be disabled")
+        eta_model = None
+    except Exception as e:
+        logger.error(f"Failed to load ETA model: {e}")
+        eta_model = None
+
     yield
     
     if redis_client:
@@ -52,7 +68,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Fleet Dynamic Pricing System",
+    title="Ride-Hailing Dynamic Pricing ETA System",
     description="Real-time feature retrieval for dynamic pricing inference",
     version="1.0.0",
     lifespan=lifespan,
@@ -275,4 +291,80 @@ def drift_summary():
             "deadhead_km_avg": summarize("deadhead_km_avg"),
             "surge_pressure": summarize("surge_pressure"),
         },
+    }
+
+
+@app.post("/v1/eta/quote")
+def eta_quote(
+    lat: float,
+    lng: float,
+    trip_distance_km: float,
+    timestamp: str | None = None,
+):
+    """
+    Get an ETA estimate for a trip.
+    
+    Uses marketplace features and trip distance to predict
+    estimated time of arrival using an XGBoost model.
+    
+    Args:
+        lat: Pickup latitude
+        lng: Pickup longitude
+        trip_distance_km: Estimated trip distance in kilometers
+        timestamp: Optional ISO timestamp (defaults to now)
+    
+    Returns:
+        ETA prediction in seconds and minutes with latency
+    """
+    if eta_model is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="ETA model not loaded. Please ensure model file exists."
+        )
+    
+    start = time.perf_counter()
+
+    if timestamp:
+        try:
+            ts = datetime.fromisoformat(timestamp)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid timestamp format")
+    else:
+        ts = datetime.now(timezone.utc)
+    
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    try:
+        h3_index = h3.latlng_to_cell(lat, lng, 8)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid coordinates: {e}")
+
+    raw_5m = fetch_window(
+        redis_client=redis_client,
+        city=CITY,
+        h3_index=h3_index,
+        window=5,
+        ts=ts,
+    )
+
+    features_5m = derive_features(raw_5m)
+
+    eta_features = assemble_eta_features(
+        trip_distance_km=trip_distance_km,
+        features_5m=features_5m,
+    )
+
+    eta_seconds = eta_model.predict(eta_features)
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    record_latency(redis_client, "eta", latency_ms)
+
+    return {
+        "city": CITY,
+        "h3_res8": h3_index,
+        "trip_distance_km": trip_distance_km,
+        "eta_seconds": int(eta_seconds),
+        "eta_minutes": round(eta_seconds / 60, 1),
+        "latency_ms": round(latency_ms, 2),
     }
