@@ -12,6 +12,7 @@ COPY services/common /app/services/common
 COPY services/inference-api/main.py /app/main.py
 COPY services/inference-api/features.py /app/features.py
 COPY services/inference-api/derive.py /app/derive.py
+COPY services/inference-api/pricing.py /app/pricing.py
 
 ENV PYTHONPATH=/app
 
