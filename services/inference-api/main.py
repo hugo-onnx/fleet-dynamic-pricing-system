@@ -1,6 +1,9 @@
 import h3
+import time
+import json
 import redis
 import logging
+import numpy as np
 
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
@@ -10,6 +13,8 @@ from services.common.config import REDIS_HOST, REDIS_PORT, CITY
 from features import fetch_window, WINDOWS
 from derive import derive_features
 from pricing import compute_price_multiplier
+from monitoring.metrics import record_latency
+from monitoring.drift import record_feature_snapshot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -176,6 +181,7 @@ def pricing_quote(
     Get a dynamic pricing quote for a location.
     
     Uses 5-minute window features to compute surge pricing multiplier.
+    Includes monitoring for latency and feature drift.
     
     Args:
         lat: Latitude
@@ -185,6 +191,8 @@ def pricing_quote(
     Returns:
         Pricing quote with multiplier and feature breakdown
     """
+    start = time.perf_counter()
+
     if timestamp:
         try:
             ts = datetime.fromisoformat(timestamp)
@@ -212,10 +220,59 @@ def pricing_quote(
     features_5m = derive_features(raw_5m)
     pricing = compute_price_multiplier(features_5m)
 
+    record_feature_snapshot(
+        redis_client=redis_client,
+        city=CITY,
+        features=features_5m,
+    )
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    record_latency(redis_client, "pricing", latency_ms)
+
     return {
         "city": CITY,
         "h3_res8": h3_index,
         "timestamp": ts.isoformat(),
         "features": features_5m,
         "pricing": pricing,
+        "latency_ms": round(latency_ms, 2),
+    }
+
+
+@app.get("/v1/monitoring/drift")
+def drift_summary():
+    """
+    Get feature drift summary statistics.
+    
+    Analyzes stored feature snapshots to compute percentile statistics
+    for key features, useful for detecting distribution drift over time.
+    
+    Returns:
+        Summary with p50 and p95 for key features, or insufficient_data status
+    """
+    key = f"drift:{CITY}"
+    data = redis_client.lrange(key, 0, -1)
+
+    if len(data) < 50:
+        return {"status": "insufficient_data", "samples": len(data)}
+
+    parsed = [json.loads(x)["features"] for x in data]
+
+    def summarize(field):
+        values = [f[field] for f in parsed if field in f]
+        if not values:
+            return {"p50": 0.0, "p95": 0.0}
+        return {
+            "p50": round(float(np.percentile(values, 50)), 3),
+            "p95": round(float(np.percentile(values, 95)), 3),
+        }
+
+    return {
+        "city": CITY,
+        "samples": len(parsed),
+        "features": {
+            "supply_demand_ratio": summarize("supply_demand_ratio"),
+            "deadhead_km_avg": summarize("deadhead_km_avg"),
+            "surge_pressure": summarize("surge_pressure"),
+        },
     }
